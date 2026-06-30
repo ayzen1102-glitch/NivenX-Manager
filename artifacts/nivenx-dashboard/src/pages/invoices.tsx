@@ -4,7 +4,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { FileText, RefreshCw } from "lucide-react";
 
 export default function Invoices() {
-  const { data: invoices = [], isLoading, refetch } = useQuery({
+  const { data: rawInvoices, isLoading, refetch } = useQuery({
     queryKey: ["invoices"],
     queryFn: api.invoices,
     refetchInterval: 60000,

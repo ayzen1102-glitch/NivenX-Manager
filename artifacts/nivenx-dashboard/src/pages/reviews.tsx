@@ -16,11 +16,12 @@ function StarRating({ rating }: { rating: number }) {
 }
 
 export default function Reviews() {
-  const { data: reviews = [], isLoading, refetch } = useQuery({
+  const { data: rawReviews, isLoading, refetch } = useQuery({
     queryKey: ["reviews"],
     queryFn: api.reviews,
     refetchInterval: 60000,
   });
+  const reviews = Array.isArray(rawReviews) ? rawReviews : [];
 
   const avg = reviews.length
     ? (reviews.reduce((s, r) => s + r.rating, 0) / reviews.length).toFixed(1)

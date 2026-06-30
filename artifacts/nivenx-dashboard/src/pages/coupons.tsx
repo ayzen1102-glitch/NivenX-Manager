@@ -9,10 +9,11 @@ export default function Coupons() {
   const [form, setForm] = useState({ code: "", discount_type: "percentage", discount_value: "", max_uses: "1" });
   const qc = useQueryClient();
 
-  const { data: coupons = [], isLoading, refetch } = useQuery({
+  const { data: rawCoupons, isLoading, refetch } = useQuery({
     queryKey: ["coupons"],
     queryFn: api.coupons,
   });
+  const coupons = Array.isArray(rawCoupons) ? rawCoupons : [];
 
   const { mutate: createCoupon, isPending: creating } = useMutation({
     mutationFn: () =>

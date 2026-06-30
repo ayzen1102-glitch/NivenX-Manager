@@ -3,7 +3,7 @@ import { api } from "@/lib/api";
 import { ClipboardList, RefreshCw } from "lucide-react";
 
 export default function AuditLog() {
-  const { data: logs = [], isLoading, refetch } = useQuery({
+  const { data: rawLogs, isLoading, refetch } = useQuery({
     queryKey: ["auditlog"],
     queryFn: api.auditlog,
     refetchInterval: 30000,

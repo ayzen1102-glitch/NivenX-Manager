@@ -13,11 +13,12 @@ export default function Orders() {
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const qc = useQueryClient();
 
-  const { data: orders = [], isLoading, refetch } = useQuery({
+  const { data: rawOrders, isLoading, refetch } = useQuery({
     queryKey: ["orders", filterStatus],
     queryFn: () => api.orders(filterStatus === "All" ? undefined : filterStatus),
     refetchInterval: 30000,
   });
+  const orders: Order[] = Array.isArray(rawOrders) ? rawOrders : [];
 
   const { mutate: updateStatus } = useMutation({
     mutationFn: ({ id, status }: { id: string; status: string }) => api.updateOrderStatus(id, status),

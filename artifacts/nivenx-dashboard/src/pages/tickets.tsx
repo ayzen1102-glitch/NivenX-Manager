@@ -7,11 +7,12 @@ import { Ticket, RefreshCw } from "lucide-react";
 export default function Tickets() {
   const [filterStatus, setFilterStatus] = useState("open");
 
-  const { data: tickets = [], isLoading, refetch } = useQuery({
+  const { data: rawTickets, isLoading, refetch } = useQuery({
     queryKey: ["tickets", filterStatus],
     queryFn: () => api.tickets(filterStatus),
     refetchInterval: 30000,
   });
+  const tickets = Array.isArray(rawTickets) ? rawTickets : [];
 
   return (
     <div className="space-y-5">

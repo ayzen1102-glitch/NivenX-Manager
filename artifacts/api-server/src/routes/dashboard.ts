@@ -6,13 +6,13 @@
 import { Router, type IRouter } from "express";
 import { DatabaseSync } from "node:sqlite";
 import { existsSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 
 const router: IRouter = Router();
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = join(__dirname, "../../../../artifacts/nivenx-bot/data/nivenx.db");
+// process.cwd() is the package dir (/home/runner/workspace/artifacts/api-server)
+const DB_PATH = join(process.cwd(), "../nivenx-bot/data/nivenx.db");
+console.log("[Dashboard] DB_PATH resolved to:", DB_PATH);
 
 function getDb() {
   if (!existsSync(DB_PATH)) return null;
