@@ -1,0 +1,2 @@
+- [NivenX Bot SQLite](nivenx-sqlite.md) — use node:sqlite (built-in Node 24) not better-sqlite3; gyp/Python unavailable in Replit.
+- [NivenX Bot structure](nivenx-structure.md) — bot lives at artifacts/nivenx-bot, ESM, node:sqlite, deploy script must be run after every command change.
