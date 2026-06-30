@@ -1,10 +1,11 @@
 /**
- * NivenX Assistant - /services command
- * Display available services without starting an order.
+ * NivenX - /services command (Components V2)
  */
 
-import { SlashCommandBuilder, EmbedBuilder } from 'discord.js';
+import { SlashCommandBuilder } from 'discord.js';
 import { config } from '../../config/config.js';
+import { ServicePricing } from '../../database/queries.js';
+import { buildServicesCard } from '../../ui/v2/generalV2.js';
 
 export default {
   data: new SlashCommandBuilder()
@@ -12,20 +13,9 @@ export default {
     .setDescription('Browse all available NivenX services'),
 
   async execute(interaction) {
-    const embed = new EmbedBuilder()
-      .setTitle('🌐 NivenX Services Catalog')
-      .setDescription('Here\'s everything we offer. Use `/order` to place an order for any service.')
-      .setColor(config.bot.color)
-      .addFields(
-        config.services.map(s => ({
-          name: s.label,
-          value: s.description,
-          inline: true,
-        }))
-      )
-      .setFooter({ text: 'NivenX Assistant • Use /order to get started' })
-      .setTimestamp();
-
-    await interaction.reply({ embeds: [embed] });
+    const pricing = {};
+    const dbPricing = ServicePricing.findAll();
+    for (const p of dbPricing) pricing[p.service_id] = p.base_price;
+    await interaction.reply(buildServicesCard(config.services, pricing));
   },
 };

@@ -5,7 +5,7 @@
 
 import { InteractionType } from 'discord.js';
 import { logger } from '../utils/logger.js';
-import { errorEmbed } from '../ui/embeds/generalEmbed.js';
+import { errorCard } from '../ui/v2/generalV2.js';
 
 // Sub-handlers for each interaction type
 import { handleCommand } from './subhandlers/commandInteraction.js';
@@ -30,10 +30,7 @@ export async function handleInteraction(interaction, client) {
   } catch (err) {
     logger.error('InteractionHandler', `Unhandled error: ${err.message}\n${err.stack}`);
 
-    const errorResponse = {
-      embeds: [errorEmbed('Something went wrong', `An unexpected error occurred. Please try again.\n\`\`\`${err.message}\`\`\``)],
-      ephemeral: true,
-    };
+    const errorResponse = errorCard('Something Went Wrong', `An unexpected error occurred. Please try again.\n\`\`\`${err.message.slice(0, 200)}\`\`\``);
 
     try {
       if (interaction.replied || interaction.deferred) {

@@ -1,18 +1,62 @@
 /**
- * NivenX Assistant - Button Interaction Sub-handler
- * Routes button clicks to the correct handler based on customId prefix.
+ * NivenX - Button Interaction Handler (Components V2)
+ * Routes all button clicks.
  */
 
+import { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } from 'discord.js';
 import { logger } from '../../utils/logger.js';
-import { Orders, Tickets, Coupons } from '../../database/queries.js';
-import { updateOrderStatus } from '../../services/orderService.js';
+import { Orders, Tickets, Coupons, Giveaways, Polls, Payments, Invoices, UserAccounts } from '../../database/queries.js';
+import { updateOrderStatus, confirmOrder } from '../../services/orderService.js';
 import { closeTicket } from '../../services/ticketService.js';
-import { buildOrderEmbed } from '../../ui/embeds/orderEmbed.js';
-import { buildSetPriceModal, buildCouponModal } from '../../ui/components/orderComponents.js';
-import { buildCloseConfirmButtons } from '../../ui/components/ticketComponents.js';
-import { successEmbed, errorEmbed, warningEmbed } from '../../ui/embeds/generalEmbed.js';
-import { config } from '../../config/config.js';
+import { verifyPayment, rejectPayment } from '../../services/paymentService.js';
+import { redeemPoints } from '../../services/accountService.js';
+import { successCard, errorCard, warningCard, buildPaymentProofCard, buildCloseConfirmCard, buildGiveawayCard } from '../../ui/v2/generalV2.js';
+import { buildOrderConfirmedCard, buildNewOrderNotification } from '../../ui/v2/orderV2.js';
+import { buildTicketClaimedCard } from '../../ui/v2/ticketV2.js';
 import { isStaff } from '../../utils/permissions.js';
+import { config } from '../../config/config.js';
+
+function buildSetPriceModal(orderId) {
+  return new ModalBuilder()
+    .setCustomId(`set_price_${orderId}`)
+    .setTitle(`Set Price — ${orderId}`)
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('price').setLabel('Price (USD)').setStyle(TextInputStyle.Short).setPlaceholder('e.g. 49.99').setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('notes').setLabel('Notes (optional)').setStyle(TextInputStyle.Paragraph).setRequired(false)
+      ),
+    );
+}
+
+function buildCouponModal(orderId) {
+  return new ModalBuilder()
+    .setCustomId(`coupon_modal_${orderId}`)
+    .setTitle('Apply Coupon Code')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('coupon_code').setLabel('Coupon Code').setStyle(TextInputStyle.Short).setPlaceholder('e.g. SAVE20').setRequired(true)
+      )
+    );
+}
+
+function buildPaymentProofModal(orderId) {
+  return new ModalBuilder()
+    .setCustomId(`payment_proof_${orderId}`)
+    .setTitle('Submit Payment Proof')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('method').setLabel('Payment Method Used').setStyle(TextInputStyle.Short).setPlaceholder('e.g. PayPal, Crypto').setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('tx_id').setLabel('Transaction ID / Reference').setStyle(TextInputStyle.Short).setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('notes').setLabel('Additional Notes').setStyle(TextInputStyle.Paragraph).setRequired(false)
+      ),
+    );
+}
 
 export async function handleButton(interaction, client) {
   const { customId } = interaction;
@@ -22,113 +66,145 @@ export async function handleButton(interaction, client) {
   if (customId.startsWith('order_confirm_')) {
     const orderId = customId.replace('order_confirm_', '');
     const order = Orders.findById(orderId);
-
     if (!order || order.user_id !== interaction.user.id) {
-      return interaction.reply({ embeds: [errorEmbed('Not Found', 'Order not found or not yours.')], ephemeral: true });
+      return interaction.reply(errorCard('Not Found', 'Order not found or not yours.'));
     }
+    await interaction.deferUpdate();
+    const confirmed = confirmOrder(orderId, interaction.user.id, interaction.user.tag);
 
-    // Disable buttons
-    await interaction.update({ components: [] });
+    await interaction.followUp({ ...buildOrderConfirmedCard(confirmed), flags: 64 });
 
-    const embed = buildOrderEmbed(order);
-    await interaction.followUp({
-      embeds: [
-        embed,
-        successEmbed('Order Submitted!', `Your order **${orderId}** has been received.\nA staff member will review it shortly and reach out via ticket.`),
-      ],
-      ephemeral: true,
-    });
-
-    // Notify in orders channel if configured
+    // Notify staff in orders channel
     const ordersChannel = interaction.guild.channels.cache.find(c => c.name === 'orders');
     if (ordersChannel) {
-      await ordersChannel.send({
-        embeds: [buildOrderEmbed(order)],
-        content: `📦 New order from <@${order.user_id}>`,
-      });
+      await ordersChannel.send(buildNewOrderNotification(confirmed)).catch(() => {});
     }
+    return;
   }
 
   // ── Order: Cancel ───────────────────────────────
-  else if (customId.startsWith('order_cancel_')) {
-    await interaction.update({
-      embeds: [errorEmbed('Order Cancelled', 'Your order has been discarded.')],
-      components: [],
-    });
+  if (customId.startsWith('order_cancel_')) {
+    const orderId = customId.replace('order_cancel_', '');
+    Orders.updateStatus(orderId, 'Cancelled');
+    await interaction.update({ components: [] });
+    await interaction.followUp({ ...errorCard('Order Cancelled', 'Your order was discarded. Use `/order` to start a new one.'), flags: 64 });
+    return;
   }
 
   // ── Order: Apply Coupon ─────────────────────────
-  else if (customId.startsWith('order_coupon_')) {
+  if (customId.startsWith('order_coupon_')) {
     const orderId = customId.replace('order_coupon_', '');
-    await interaction.showModal(buildCouponModal(orderId));
+    return interaction.showModal(buildCouponModal(orderId));
+  }
+
+  // ── Order: Submit Payment ───────────────────────
+  if (customId.startsWith('order_pay_')) {
+    const orderId = customId.replace('order_pay_', '');
+    return interaction.showModal(buildPaymentProofModal(orderId));
   }
 
   // ── Ticket: Close ───────────────────────────────
-  else if (customId.startsWith('ticket_close_') && !customId.includes('confirm') && !customId.includes('cancel')) {
+  if (customId.startsWith('ticket_close_') && !customId.includes('confirm') && !customId.includes('cancel')) {
     const ticketId = customId.replace('ticket_close_', '');
     const ticket = Tickets.findById(ticketId);
-
-    if (!ticket) return interaction.reply({ embeds: [errorEmbed('Not Found', 'Ticket not found.')], ephemeral: true });
-
-    // Only ticket owner or staff can close
+    if (!ticket) return interaction.reply({ ...errorCard('Not Found', 'Ticket not found.'), flags: 64 });
     if (ticket.user_id !== interaction.user.id && !isStaff(interaction.member)) {
-      return interaction.reply({ embeds: [errorEmbed('Permission Denied', 'Only the ticket owner or staff can close this ticket.')], ephemeral: true });
+      return interaction.reply({ ...errorCard('Permission Denied', 'Only the ticket owner or staff can close this ticket.'), flags: 64 });
     }
-
-    await interaction.reply({
-      embeds: [warningEmbed('Close Ticket?', 'Are you sure you want to close this ticket? A transcript will be saved.')],
-      components: [buildCloseConfirmButtons(ticketId)],
-      ephemeral: true,
-    });
+    return interaction.reply({ ...buildCloseConfirmCard(ticketId), flags: 64 });
   }
 
   // ── Ticket: Close Confirm ───────────────────────
-  else if (customId.startsWith('ticket_close_confirm_')) {
+  if (customId.startsWith('ticket_close_confirm_')) {
     await interaction.deferUpdate();
     try {
-      await closeTicket({
-        guild: interaction.guild,
-        channel: interaction.channel,
-        closedBy: interaction.user,
-      });
+      await closeTicket({ guild: interaction.guild, channel: interaction.channel, closedBy: interaction.user });
     } catch (err) {
-      await interaction.followUp({ embeds: [errorEmbed('Error', err.message)], ephemeral: true });
+      await interaction.followUp({ ...errorCard('Error', err.message), flags: 64 });
     }
+    return;
   }
 
   // ── Ticket: Close Cancel ────────────────────────
-  else if (customId.startsWith('ticket_close_cancel_')) {
-    await interaction.update({ content: 'Close cancelled.', embeds: [], components: [] });
+  if (customId.startsWith('ticket_close_cancel_')) {
+    return interaction.update({ components: [] });
   }
 
   // ── Ticket: Claim ───────────────────────────────
-  else if (customId.startsWith('ticket_claim_')) {
+  if (customId.startsWith('ticket_claim_')) {
     if (!isStaff(interaction.member)) {
-      return interaction.reply({ embeds: [errorEmbed('Permission Denied', 'Only staff can claim tickets.')], ephemeral: true });
+      return interaction.reply({ ...errorCard('Permission Denied', 'Only staff can claim tickets.'), flags: 64 });
     }
-    await interaction.reply({
-      embeds: [successEmbed('Ticket Claimed', `This ticket has been claimed by <@${interaction.user.id}>. Staff will assist shortly.`)],
-    });
+    const ticketId = customId.replace('ticket_claim_', '');
+    Tickets.updateAssignee(ticketId, interaction.user.id, interaction.user.tag);
+    return interaction.reply(buildTicketClaimedCard(interaction.user));
   }
 
   // ── Ticket: Transcript ──────────────────────────
-  else if (customId.startsWith('ticket_transcript_')) {
+  if (customId.startsWith('ticket_transcript_')) {
     if (!isStaff(interaction.member)) {
-      return interaction.reply({ embeds: [errorEmbed('Permission Denied', 'Only staff can save transcripts manually.')], ephemeral: true });
+      return interaction.reply({ ...errorCard('Permission Denied', 'Only staff can save transcripts.'), flags: 64 });
     }
-    await interaction.reply({ embeds: [successEmbed('Transcript Saved', 'Transcript will be saved when the ticket is closed.')], ephemeral: true });
+    return interaction.reply({ ...successCard('Transcript Queued', 'The transcript will be saved when this ticket closes.'), flags: 64 });
   }
 
   // ── Staff: Set Price ────────────────────────────
-  else if (customId.startsWith('set_price_btn_')) {
+  if (customId.startsWith('set_price_btn_')) {
     if (!isStaff(interaction.member)) {
-      return interaction.reply({ embeds: [errorEmbed('Permission Denied', 'Staff only.')], ephemeral: true });
+      return interaction.reply({ ...errorCard('Permission Denied', 'Staff only.'), flags: 64 });
     }
     const orderId = customId.replace('set_price_btn_', '');
-    await interaction.showModal(buildSetPriceModal(orderId));
+    return interaction.showModal(buildSetPriceModal(orderId));
   }
 
-  else {
-    logger.warn('ButtonInteraction', `Unhandled button customId: ${customId}`);
+  // ── Payment: Verify ─────────────────────────────
+  if (customId.startsWith('payment_verify_')) {
+    if (!isStaff(interaction.member)) {
+      return interaction.reply({ ...errorCard('Permission Denied', 'Staff only.'), flags: 64 });
+    }
+    const paymentId = customId.replace('payment_verify_', '');
+    try {
+      await verifyPayment(paymentId, interaction.user.id, interaction.user.tag, interaction.client);
+      await interaction.update({ components: [] });
+      await interaction.followUp({ ...successCard('Payment Verified', `Payment \`${paymentId}\` verified and order status updated.`), flags: 64 });
+    } catch (err) {
+      await interaction.reply({ ...errorCard('Error', err.message), flags: 64 });
+    }
+    return;
   }
+
+  // ── Payment: Reject ──────────────────────────────
+  if (customId.startsWith('payment_reject_')) {
+    if (!isStaff(interaction.member)) {
+      return interaction.reply({ ...errorCard('Permission Denied', 'Staff only.'), flags: 64 });
+    }
+    const paymentId = customId.replace('payment_reject_', '');
+    try {
+      await rejectPayment(paymentId, interaction.user.id, interaction.user.tag, interaction.client);
+      await interaction.update({ components: [] });
+      await interaction.followUp({ ...errorCard('Payment Rejected', `Payment \`${paymentId}\` has been rejected. The customer has been notified.`), flags: 64 });
+    } catch (err) {
+      await interaction.reply({ ...errorCard('Error', err.message), flags: 64 });
+    }
+    return;
+  }
+
+  // ── Points: Redeem ───────────────────────────────
+  if (customId.startsWith('points_redeem_')) {
+    const [, , userId, amount] = customId.split('_');
+    if (interaction.user.id !== userId) {
+      return interaction.reply({ ...errorCard('Not Yours', 'This button is not for you.'), flags: 64 });
+    }
+    try {
+      const pts = parseInt(amount, 10);
+      redeemPoints(interaction.user.id, pts, 'Redeemed via button', interaction.client);
+      await interaction.update({ components: [] });
+      await interaction.followUp({ ...successCard('Points Redeemed!', `You've redeemed **${pts} points** for a discount. A staff member will apply it to your next invoice.`), flags: 64 });
+    } catch (err) {
+      await interaction.reply({ ...errorCard('Error', err.message), flags: 64 });
+    }
+    return;
+  }
+
+  logger.warn('ButtonInteraction', `Unhandled button: ${customId}`);
 }

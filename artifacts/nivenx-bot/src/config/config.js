@@ -1,6 +1,6 @@
 /**
- * NivenX Assistant - Central Configuration
- * Modify these values to customize the bot behavior.
+ * NivenX Assistant - Central Configuration v3.0
+ * All customization lives here.
  */
 
 export const config = {

@@ -1,99 +1,143 @@
 /**
  * NivenX Assistant - Scheduler Service
- * Runs periodic background tasks: auto-close tickets, auto-cancel stale orders.
+ * Runs background tasks every 5 min: auto-close tickets/orders,
+ * payment reminders, notification queue, polls, giveaways, reminders.
  */
 
-import { Tickets, Orders } from '../database/queries.js';
+import { Tickets, Orders, Invoices, Giveaways, Polls, Reminders } from '../database/queries.js';
 import { closeTicket } from './ticketService.js';
+import { processNotificationQueue, sendDMNotification, setNotificationClient } from './notificationService.js';
+import { buildGiveawayCard } from '../ui/v2/generalV2.js';
 import { config } from '../config/config.js';
 import { logger } from '../utils/logger.js';
 
-/**
- * Start all background schedulers. Called once on bot startup.
- */
 export function startAutoCloseScheduler(client) {
-  // Run every 30 minutes
-  const INTERVAL_MS = 30 * 60 * 1000;
-
-  setInterval(() => runScheduledTasks(client), INTERVAL_MS);
-  logger.info('Scheduler', 'Auto-close scheduler started (runs every 30 minutes)');
+  setNotificationClient(client);
+  runScheduler(client);
+  setInterval(() => runScheduler(client), 5 * 60 * 1000);
+  logger.info('Scheduler', 'Scheduler started (every 5 minutes)');
 }
 
-/**
- * Main scheduled task runner.
- */
-async function runScheduledTasks(client) {
-  logger.debug('Scheduler', 'Running scheduled tasks...');
-
-  await autoCloseInactiveTickets(client);
-  await autoCancelStaleOrders(client);
-}
-
-/**
- * Auto-close tickets that have been inactive beyond the configured threshold.
- */
-async function autoCloseInactiveTickets(client) {
+async function runScheduler(client) {
   try {
-    const openTickets = Tickets.findAll('open');
-    const thresholdMs = config.tickets.autoCloseHours * 60 * 60 * 1000;
-    const now = Date.now();
-
-    for (const ticket of openTickets) {
-      const lastActivity = new Date(ticket.last_activity).getTime();
-      if (now - lastActivity >= thresholdMs) {
-        // Find the channel
-        for (const guild of client.guilds.cache.values()) {
-          const channel = guild.channels.cache.get(ticket.channel_id);
-          if (channel) {
-            logger.info('Scheduler', `Auto-closing inactive ticket ${ticket.ticket_id}`);
-            try {
-              await closeTicket({
-                guild,
-                channel,
-                closedBy: client.user,
-              });
-            } catch (err) {
-              logger.warn('Scheduler', `Failed to auto-close ticket ${ticket.ticket_id}: ${err.message}`);
-            }
-            break;
-          }
-        }
-      }
-    }
+    await autoCloseStaleTickets(client);
+    await autoCancelStaleOrders(client);
+    await processPaymentReminders();
+    await processNotificationQueue();
+    await checkGiveawayEndings(client);
+    await checkPollEndings();
+    await processReminders(client);
   } catch (err) {
-    logger.error('Scheduler', `Auto-close tickets error: ${err.message}`);
+    logger.error('Scheduler', `Scheduler error: ${err.message}`);
   }
 }
 
-/**
- * Auto-cancel orders that have been pending payment for too long.
- */
+async function autoCloseStaleTickets(client) {
+  try {
+    const openTickets = Tickets.findAll('open');
+    const thresholdMs = config.tickets.autoCloseHours * 60 * 60 * 1000;
+
+    for (const ticket of openTickets) {
+      const lastActivity = new Date(ticket.last_activity).getTime();
+      if (Date.now() - lastActivity < thresholdMs) continue;
+
+      const guild = client?.guilds.cache.get(ticket.guild_id);
+      if (!guild) continue;
+      const channel = guild.channels.cache.get(ticket.channel_id);
+      if (!channel) {
+        Tickets.close(ticket.channel_id, 'auto-close', 'Auto-closed (channel missing)');
+        continue;
+      }
+
+      try {
+        await closeTicket({ guild, channel, closedBy: client.user });
+        logger.info('Scheduler', `Auto-closed ticket ${ticket.ticket_id}`);
+      } catch (err) {
+        logger.warn('Scheduler', `Could not auto-close ${ticket.ticket_id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error('Scheduler', `Auto-close tickets: ${err.message}`);
+  }
+}
+
 async function autoCancelStaleOrders(client) {
   try {
     const pending = Orders.findByStatus('Awaiting Payment');
     const thresholdMs = config.orders.autoCloseHours * 60 * 60 * 1000;
-    const now = Date.now();
 
     for (const order of pending) {
-      const updatedAt = new Date(order.updated_at).getTime();
-      if (now - updatedAt >= thresholdMs) {
-        Orders.updateStatus(order.order_id, 'Cancelled');
-        logger.info('Scheduler', `Auto-cancelled stale order ${order.order_id}`);
-
-        // DM the customer
-        try {
-          const user = await client.users.fetch(order.user_id);
-          await user.send({
-            embeds: [{
-              color: 0xED4245,
-              title: '❌ Order Cancelled',
-              description: `Your order **${order.order_id}** (${order.service_label}) was automatically cancelled due to no payment within ${config.orders.autoCloseHours} hours.\n\nUse \`/order\` to place a new order.`,
-            }],
-          });
-        } catch { /* DMs closed */ }
-      }
+      if (Date.now() - new Date(order.updated_at).getTime() < thresholdMs) continue;
+      Orders.updateStatus(order.order_id, 'Cancelled');
+      await sendDMNotification(order.user_id, 'order_status', {
+        orderId: order.order_id, from: 'Awaiting Payment', to: 'Cancelled',
+        notes: `Auto-cancelled: no payment within ${config.orders.autoCloseHours}h.`,
+      });
+      logger.info('Scheduler', `Auto-cancelled order ${order.order_id}`);
     }
   } catch (err) {
-    logger.error('Scheduler', `Auto-cancel orders error: ${err.message}`);
+    logger.error('Scheduler', `Auto-cancel orders: ${err.message}`);
+  }
+}
+
+async function processPaymentReminders() {
+  try {
+    const overdueInvoices = Invoices.findOverdue();
+    for (const invoice of overdueInvoices) {
+      await sendDMNotification(invoice.user_id, 'invoice_due', {
+        invoiceId: invoice.invoice_id, amount: invoice.total, dueDate: invoice.due_date,
+      });
+    }
+  } catch (err) {
+    logger.error('Scheduler', `Payment reminders: ${err.message}`);
+  }
+}
+
+async function checkGiveawayEndings(client) {
+  if (!client) return;
+  try {
+    const active = Giveaways.findActive();
+    for (const g of active) {
+      if (!g.ends_at || new Date(g.ends_at) > new Date()) continue;
+      const winner = Giveaways.end(g.id);
+      const channel = client.channels.cache.get(g.channel_id);
+      if (!channel) continue;
+
+      if (g.message_id) {
+        const msg = await channel.messages.fetch(g.message_id).catch(() => null);
+        if (msg) await msg.edit(buildGiveawayCard({ ...g, entries: g.entries.length }, true, winner)).catch(() => {});
+      }
+      await channel.send({ content: winner ? `🎉 Congratulations <@${winner}>! You won **${g.prize}**!` : `Giveaway for **${g.prize}** ended with no entries.` });
+      logger.info('Scheduler', `Giveaway ${g.id} ended. Winner: ${winner ?? 'none'}`);
+    }
+  } catch (err) {
+    logger.error('Scheduler', `Giveaway endings: ${err.message}`);
+  }
+}
+
+async function checkPollEndings() {
+  try {
+    const active = Polls.findActive();
+    for (const poll of active) {
+      if (!poll.ends_at || new Date(poll.ends_at) > new Date()) continue;
+      Polls.end(poll.poll_id);
+      logger.info('Scheduler', `Poll ${poll.poll_id} ended.`);
+    }
+  } catch (err) {
+    logger.error('Scheduler', `Poll endings: ${err.message}`);
+  }
+}
+
+async function processReminders(client) {
+  if (!client) return;
+  try {
+    const due = Reminders.findDue();
+    for (const reminder of due) {
+      Reminders.markSent(reminder.id);
+      const channel = client.channels.cache.get(reminder.channel_id);
+      if (channel) await channel.send({ content: `⏰ <@${reminder.user_id}> **Reminder:** ${reminder.message}` }).catch(() => {});
+    }
+  } catch (err) {
+    logger.error('Scheduler', `Reminders: ${err.message}`);
   }
 }

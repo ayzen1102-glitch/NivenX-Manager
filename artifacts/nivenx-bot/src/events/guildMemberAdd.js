@@ -1,11 +1,13 @@
 /**
- * NivenX Assistant - guildMemberAdd Event
- * Welcome new members and assign a Customer role if configured.
+ * NivenX - guildMemberAdd Event (Components V2)
+ * Welcome new members, create account, assign Customer role.
  */
 
-import { EmbedBuilder } from 'discord.js';
 import { config } from '../config/config.js';
 import { logger } from '../utils/logger.js';
+import { UserAccounts } from '../database/queries.js';
+import { ensureAccount } from '../services/accountService.js';
+import { buildWelcomeCard } from '../ui/v2/generalV2.js';
 
 export default {
   name: 'guildMemberAdd',
@@ -14,21 +16,21 @@ export default {
   async execute(member, client) {
     logger.info('GuildMemberAdd', `${member.user.tag} joined ${member.guild.name}`);
 
-    // Post welcome in a welcome channel if it exists
+    // Auto-create account
+    try {
+      ensureAccount(member.user.id, member.user.tag, member.guild.id);
+    } catch {}
+
+    // Assign Customer role
+    try {
+      const customerRole = member.guild.roles.cache.find(r => r.name === config.roles.customer);
+      if (customerRole) await member.roles.add(customerRole);
+    } catch {}
+
+    // Welcome message using Components V2
     const welcomeChannel = member.guild.channels.cache.find(c => c.name === 'welcome');
     if (welcomeChannel) {
-      const embed = new EmbedBuilder()
-        .setTitle(`👋 Welcome to ${member.guild.name}!`)
-        .setDescription(
-          `Hey <@${member.id}>, welcome to **${member.guild.name}**!\n\n` +
-          `Browse our services and open a ticket to get started.\n` +
-          `Use \`/services\` to see what we offer.`
-        )
-        .setColor(config.bot.color)
-        .setThumbnail(member.user.displayAvatarURL())
-        .setTimestamp();
-
-      await welcomeChannel.send({ embeds: [embed] }).catch(() => {});
+      await welcomeChannel.send(buildWelcomeCard(member, member.guild.name)).catch(() => {});
     }
   },
 };
